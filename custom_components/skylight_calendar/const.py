@@ -12,6 +12,10 @@ CONF_FRAME_NAME = "frame_name"
 # API
 BASE_URL = "https://app.ourskylight.com"
 OAUTH_URL = "https://app.ourskylight.com/oauth/token"
+OAUTH_AUTHORIZE_URL = "https://app.ourskylight.com/oauth/authorize"
+OAUTH_REDIRECT_URI = "https://ourskylight.com/welcome"
+OAUTH_CLIENT_ID = "skylight-mobile"
+OAUTH_SCOPE = "everything"
 API_VERSION = "2026-05-01"
 CLIENT_ID = "skylight-mobile"
 USER_AGENT = (

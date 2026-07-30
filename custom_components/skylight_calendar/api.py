@@ -312,3 +312,58 @@ async def exchange_refresh_token(
         "access_token": data["access_token"],
         "refresh_token": data.get("refresh_token", refresh_token),
     }
+
+
+async def exchange_authorization_code(
+    session: aiohttp.ClientSession,
+    code: str,
+    code_verifier: str,
+    device_fingerprint: str = "",
+) -> dict:
+    """OAuth2 authorization_code + PKCE exchange used by the config flow.
+
+    The Skylight OAuth server only allows one registered redirect URI
+    (``https://ourskylight.com/welcome``), so we always pass that back — the
+    server never actually redirects there during the HA flow; the user copies
+    the ``?code=...`` value out of their browser's address bar.
+    """
+    from .const import OAUTH_REDIRECT_URI
+
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": CLIENT_ID,
+        "redirect_uri": OAUTH_REDIRECT_URI,
+        "code_verifier": code_verifier,
+        "scope": "everything",
+        "source": "js-mobile",
+        "skylight_api_client_device_fingerprint": device_fingerprint,
+        "skylight_api_client_device_platform": "web",
+        "skylight_api_client_device_name": "home-assistant",
+        "skylight_api_client_device_os_version": "unknown",
+        "skylight_api_client_device_app_version": "unknown",
+        "skylight_api_client_device_hardware": "3",
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    async with session.post(
+        OAUTH_URL,
+        data=payload,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        text = await resp.text()
+        if resp.status != 200:
+            raise SkylightAuthError(
+                f"Authorization code exchange failed ({resp.status}): {text[:200]}"
+            )
+        data = _json.loads(text)
+    if not data.get("access_token") or not data.get("refresh_token"):
+        raise SkylightAuthError(f"Code exchange: missing tokens: {data}")
+    return {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+    }

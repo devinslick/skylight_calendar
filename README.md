@@ -2,7 +2,7 @@
 
 Integrate your [Skylight Frame](https://www.ourskylight.com/) into Home Assistant — calendar events, chores, meals, shopping/to-do lists, and reward stars.
 
-> **v2.0.0 — breaking change.** Skylight migrated their API to OAuth2. The legacy username / password login no longer works. You now capture your tokens once from your browser's DevTools and paste them into the config flow. Home Assistant then rotates the refresh token automatically forever.
+> **v2.1.0.** Skylight uses OAuth2. Home Assistant now handles the whole handshake — click a link, sign in on Skylight's own page, paste the authorization code back into Home Assistant. No browser DevTools, no manually copying tokens. HA rotates the refresh token automatically forever after that.
 
 ---
 
@@ -10,11 +10,12 @@ Integrate your [Skylight Frame](https://www.ourskylight.com/) into Home Assistan
 
 | HA Platform | What you get |
 |---|---|
-| `calendar` | One HA calendar entity per frame, showing all events (Google-synced + native Skylight events). |
-| `todo` | One HA todo list entity per Skylight list — **Grocery List**, **To-Do List**, and any other list you create on the frame. Create / complete / rename / delete items round-trip to the frame. |
-| `sensor.<frame> chores_today` | Count of chores due today, with full chore list in attributes. |
-| `sensor.<frame> meals_today` | Count of meals planned for today, with details in attributes. |
-| `sensor.<frame> <person>_stars` | One reward-star balance sensor per family profile (Devin, Tabi, Logan, …). |
+| `calendar` | One aggregate calendar per frame **plus** one calendar entity per source calendar (Google, Proton, iCloud, native Skylight events). |
+| `todo` | One HA todo list entity per Skylight list — **Grocery List**, **To-Do List**, and any other list you create on the frame — plus one **chore queue** per family member. Create / complete / rename / delete items round-trips to the frame in real time. |
+| `sensor` | `chores_today`, `meals_today`, one **per-member chores_today** sensor (with `by_status` breakdown attributes), one **per-meal-slot** sensor (Breakfast / Lunch / Dinner / Snack), and one **reward-star balance** sensor per family profile. |
+| `image` | `latest_photo` — the most recent photo uploaded to the frame. |
+| `switch` | `sleep_mode` — toggle the frame's sleep mode. |
+| `number` | `brightness` (0–255) and `slideshow_speed`. |
 
 Frame device is registered in HA's device registry, so every entity is grouped under its frame.
 
@@ -45,51 +46,28 @@ Or use this button once the repo is in HACS's default index:
 
 ---
 
-## Authentication — capturing your tokens
+## Authentication
 
-Skylight's mobile app / web UI both use OAuth2 with rotating refresh tokens. The refresh handshake requires a browser-signed device fingerprint, so the integration cannot log you in from HA directly — but it *can* keep a captured token pair alive indefinitely.
+Skylight's mobile app and web UI both use OAuth2 with rotating refresh tokens. The refresh handshake requires a device fingerprint, so the integration cannot log you in from HA with just an email/password — but the config flow now walks you through a **real OAuth authorization_code + PKCE** handshake with zero DevTools.
 
 ### One-time setup
 
-1. In **Google Chrome** (or any Chromium browser with DevTools), open **[https://app.ourskylight.com](https://app.ourskylight.com)** and log in normally.
-2. Open **DevTools** (⌘⌥I / Ctrl+Shift+I) → **Network** tab.
-3. In the filter box, type `oauth/token`.
-4. Click **Sign in** if you're not already logged in. You should see one or more `POST` requests to `https://app.ourskylight.com/oauth/token`.
-5. Click the **most recent successful** `oauth/token` request. Two tabs matter:
+1. Settings → Devices & Services → **Add Integration** → **Skylight Calendar**.
+2. Home Assistant shows a **Sign in to Skylight** link. Click it — it opens Skylight's sign-in page in a new browser tab.
+3. Sign in with your Skylight email and password (the same credentials you use in the Skylight mobile app).
+4. Once you're signed in, Skylight redirects you to a `https://ourskylight.com/welcome?code=...` page. **Look at the address bar** — the important part is the `code=...` value at the end of the URL.
+5. Copy the value of `code` (or paste the whole URL — Home Assistant extracts the code either way) back into the HA config flow and submit.
+6. Home Assistant exchanges the code for an access token + refresh token, enumerates your Skylight frames, and (if you have more than one) asks which frame to set up. From then on HA rotates the refresh token automatically on every 401 — you never need to sign in again unless you sign out of Skylight everywhere or the refresh grant is invalidated server-side.
 
-   **Response tab** (JSON body):
-   ```json
-   {
-     "access_token": "eyJhbGciOi...LONG_STRING",
-     "refresh_token": "def502...ANOTHER_LONG_STRING",
-     "token_type": "Bearer",
-     "expires_in": 7200,
-     ...
-   }
-   ```
-   Copy the `access_token` and `refresh_token` values.
-
-   **Payload tab** → **Form Data** view (the request body sent to the server):
-   ```
-   grant_type: authorization_code
-   ...
-   skylight_api_client_device_fingerprint: 91c3aa2f-e39d-4b41-...
-   ```
-   Copy the `skylight_api_client_device_fingerprint` value.
-
-6. In Home Assistant, the integration's config flow will ask for those three values. Paste them and submit.
-7. HA immediately does a refresh-token exchange to verify the pair and store the freshly-rotated tokens. From then on, HA rotates them automatically on every 401 — you never need to touch DevTools again unless you sign out of Skylight in your browser or the refresh grant is invalidated server-side.
+> **Codes expire in about 30 seconds.** If HA shows *"That code was rejected — codes expire in about 30 seconds"*, just click the sign-in link again to get a fresh one and paste that instead.
 
 ### If auth ever breaks later
 
-- Symptom: HA logs `Skylight auth failed after refresh` or `Refresh token was rejected`.
-- Fix: **Remove** the integration in Settings → Devices & Services, redo the DevTools capture above, and **Add Integration** again.
+Home Assistant will surface a **Reauthenticate** button on the integration card and walk you through the same one-step OAuth flow again. You do not need to remove and re-add the integration.
 
----
+### Adding a second frame
 
-## Multi-frame support
-
-The current release supports **one frame per config entry**. If your Skylight account owns multiple frames, the config flow will let you pick which one to add. To add a second frame, add the integration a second time with the same tokens — it will offer the other frames.
+If you have multiple Skylight frames on the same account, click **Add Integration** → **Skylight Calendar** a second time. The flow will list only the frames you haven't already set up.
 
 ---
 
@@ -110,12 +88,25 @@ Common issues:
 
 | Symptom | Cause / fix |
 |---|---|
-| `invalid_auth` on config flow | Refresh token was pasted with surrounding whitespace or is stale. Re-copy from DevTools. |
+| `invalid_auth` on config flow | The authorization code expired (they're valid for ~30 seconds). Click the sign-in link again and paste the fresh code. |
+| `invalid_code` on config flow | The pasted value doesn't look like a Skylight code. Copy the value of `code=` from the browser's address bar (or the whole URL — either works). |
 | Calendar entity has no events | The API returns `[]` when `date_max == date_min`; the integration handles this by fetching a 60-day forward window. If you still see nothing, check that you have events on your frame in that window. |
 | Todo entities missing after adding a new list on the frame | New lists show up on the next 2-minute refresh — reload the integration to force it immediately. |
 | Star sensors missing for one profile | The profile is only shown if `linked_to_profile=true` on its category. Ensure the profile is fully set up on the frame. |
 
 ---
+
+## What changed in v2.1.0
+
+- **Auth UX**: replaced the browser-DevTools token-paste flow with a real OAuth2 `authorization_code` + PKCE handshake. You click a link, sign in on Skylight's own hosted page, and paste back a single short code from the address bar. No DevTools, no digging through Network tab.
+- **Reauth**: HA's built-in Reauthenticate button now works — no more removing and re-adding the integration.
+- **Reconfigure**: use the ⋮ menu on the integration card to re-run the OAuth flow at any time.
+- **Multi-frame**: the config flow filters out frames you've already added, so adding a second frame is just "Add Integration" a second time.
+- **Per-source calendars**: instead of one merged calendar per frame, you now get one aggregate calendar plus one entity per source calendar (e.g. Google, Proton, iCloud, native Skylight).
+- **Per-member chore queues**: one `todo.<frame>_<person>_chores` entity per family member, with `complete_chore` write-back.
+- **Per-meal-slot sensors**: `sensor.<frame>_breakfast_today`, `_lunch_today`, `_dinner_today`, `_snack_today` — always present, `none` when empty, with attributes carrying full detail.
+- **New platforms**: `image.<frame>_latest_photo`, `switch.<frame>_sleep_mode`, `number.<frame>_brightness` (0–255), `number.<frame>_slideshow_speed`.
+- **Attributes**: chores sensors expose a `by_status` breakdown (pending / done / skipped counts + item lists).
 
 ## What changed in v2.0.0
 

@@ -1,8 +1,20 @@
-"""Config flow for Skylight Calendar (manual OAuth2 token capture)."""
+"""Config flow: OAuth2 authorization_code + PKCE (no browser dev tools).
+
+Flow shape:
+  step_user          → show the authorize URL as a copyable link, tell the user
+                       to sign in and paste back either the full callback URL
+                       or just the ?code=... value.
+  step_pick_frame    → if the account has >1 frame, choose which one.
+  step_reauth / step_reconfigure → same as step_user (reissues authorize URL).
+"""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
+import secrets
+import urllib.parse as _up
 from typing import Any
 
 import voluptuous as vol
@@ -13,7 +25,12 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import SkylightAPI, SkylightAuthError, exchange_refresh_token
+from .api import (
+    SkylightAPI,
+    SkylightAPIError,
+    SkylightAuthError,
+    exchange_authorization_code,
+)
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_DEVICE_FINGERPRINT,
@@ -21,94 +38,149 @@ from .const import (
     CONF_FRAME_NAME,
     CONF_REFRESH_TOKEN,
     DOMAIN,
+    OAUTH_AUTHORIZE_URL,
+    OAUTH_CLIENT_ID,
+    OAUTH_REDIRECT_URI,
+    OAUTH_SCOPE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_ACCESS_TOKEN): str,
-        vol.Required(CONF_REFRESH_TOKEN): str,
-        vol.Optional(CONF_DEVICE_FINGERPRINT, default=""): str,
-    }
-)
+CONF_CODE = "code"
+
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (verifier, challenge) for RFC 7636 S256 PKCE."""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _authorize_url(challenge: str) -> str:
+    qs = _up.urlencode(
+        {
+            "client_id": OAUTH_CLIENT_ID,
+            "response_type": "code",
+            "scope": OAUTH_SCOPE,
+            "redirect_uri": OAUTH_REDIRECT_URI,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "prompt": "login",
+        }
+    )
+    return f"{OAUTH_AUTHORIZE_URL}?{qs}"
+
+
+def _extract_code(raw: str) -> str | None:
+    """Accept either a raw code or the full callback URL and return the code."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    if "://" in raw or raw.startswith("/"):
+        try:
+            qs = _up.parse_qs(_up.urlparse(raw).query)
+        except ValueError:
+            return None
+        code = qs.get("code", [None])[0]
+        return code
+    # Strip a stray leading "code=" if the user pasted the fragment.
+    if raw.lower().startswith("code="):
+        return raw.split("=", 1)[1]
+    return raw
 
 
 class SkylightConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle the manual-token OAuth2 config flow."""
+    """OAuth authorization_code + PKCE config flow."""
 
     VERSION = 2
 
     def __init__(self) -> None:
+        self._verifier: str = ""
+        self._challenge: str = ""
         self._access_token: str = ""
         self._refresh_token: str = ""
         self._device_fingerprint: str = ""
         self._frames: list[dict] = []
         self._reauth_entry: ConfigEntry | None = None
 
+    # ── Primary user step ────────────────────────────────────────────────
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
         errors: dict[str, str] = {}
 
+        # Generate PKCE once per flow so refresh preserves it across form errors.
+        if not self._verifier:
+            self._verifier, self._challenge = _pkce_pair()
+
+        auth_url = _authorize_url(self._challenge)
+
         if user_input is not None:
-            session = async_get_clientsession(self.hass)
-            refresh = user_input[CONF_REFRESH_TOKEN].strip()
-            fingerprint = user_input.get(CONF_DEVICE_FINGERPRINT, "").strip()
-
-            try:
-                new_pair = await exchange_refresh_token(session, refresh, fingerprint)
-            except SkylightAuthError as err:
-                _LOGGER.warning("Refresh token exchange failed: %s", err)
-                errors["base"] = "invalid_auth"
-            except Exception:  # noqa: BLE001
-                _LOGGER.exception("Unexpected error verifying Skylight tokens")
-                errors["base"] = "cannot_connect"
-
-            if not errors:
-                self._access_token = new_pair["access_token"]
-                self._refresh_token = new_pair["refresh_token"]
-                self._device_fingerprint = fingerprint
-
-                api = SkylightAPI(
-                    session=session,
-                    access_token=self._access_token,
-                    refresh_token=self._refresh_token,
-                    device_fingerprint=fingerprint,
-                )
+            code = _extract_code(user_input.get(CONF_CODE, ""))
+            if not code:
+                errors[CONF_CODE] = "invalid_code"
+            else:
+                session = async_get_clientsession(self.hass)
+                # New fingerprint per install so multiple HA instances don't collide.
+                self._device_fingerprint = secrets.token_hex(16)
                 try:
-                    self._frames = await api.get_frames()
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("Failed to list frames")
+                    tokens = await exchange_authorization_code(
+                        session,
+                        code=code,
+                        code_verifier=self._verifier,
+                        device_fingerprint=self._device_fingerprint,
+                    )
+                except SkylightAuthError as err:
+                    _LOGGER.warning("OAuth code exchange failed: %s", err)
+                    errors["base"] = "invalid_auth"
+                except SkylightAPIError:
+                    _LOGGER.exception("Skylight OAuth token endpoint error")
                     errors["base"] = "cannot_connect"
+                else:
+                    self._access_token = tokens["access_token"]
+                    self._refresh_token = tokens["refresh_token"]
 
-                if not errors:
-                    # Reauth path: update existing entry, don't create a new one.
                     if self._reauth_entry is not None:
                         return await self._finish_reauth()
-                    if not self._frames:
-                        errors["base"] = "no_frames"
-                    elif len(self._frames) == 1:
-                        return await self._create_entry(self._frames[0])
-                    else:
-                        return await self.async_step_select_frame()
+
+                    api = SkylightAPI(
+                        session=session,
+                        access_token=self._access_token,
+                        refresh_token=self._refresh_token,
+                        device_fingerprint=self._device_fingerprint,
+                    )
+                    try:
+                        self._frames = await api.get_frames()
+                    except SkylightAPIError:
+                        _LOGGER.exception("Failed to enumerate frames")
+                        errors["base"] = "cannot_connect"
+
+                    if not errors:
+                        if not self._frames:
+                            errors["base"] = "no_frames"
+                        elif len(self._frames) == 1:
+                            return await self._create_entry(self._frames[0])
+                        else:
+                            return await self.async_step_pick_frame()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_SCHEMA,
+            data_schema=vol.Schema({vol.Required(CONF_CODE): str}),
+            description_placeholders={"auth_url": auth_url},
             errors=errors,
         )
 
-    async def async_step_select_frame(
+    # ── Frame selection ─────────────────────────────────────────────────
+
+    async def async_step_pick_frame(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        # Filter out frames already configured — supports adding a second frame.
         configured_ids = {
-            e.data.get(CONF_FRAME_ID)
-            for e in self._async_current_entries()
+            e.data.get(CONF_FRAME_ID) for e in self._async_current_entries()
         }
         available = [f for f in self._frames if f["id"] not in configured_ids]
-
         if not available:
             return self.async_abort(reason="all_frames_configured")
 
@@ -120,7 +192,7 @@ class SkylightConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         options = {f["id"]: f["name"] for f in available}
         return self.async_show_form(
-            step_id="select_frame",
+            step_id="pick_frame",
             data_schema=vol.Schema({vol.Required(CONF_FRAME_ID): vol.In(options)}),
         )
 
