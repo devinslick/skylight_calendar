@@ -58,10 +58,11 @@ class SkylightCalendarCoordinator(DataUpdateCoordinator):
                 source_calendars.append(
                     {
                         "id": str(entry.get("id")),
-                        "name": a.get("name") or a.get("email") or f"Calendar {entry.get('id')}",
-                        "email": a.get("email"),
+                        "name": a.get("label") or a.get("name") or a.get("source_id") or a.get("email") or f"Calendar {entry.get('id')}",
+                        "email": a.get("source_id") or a.get("email"),
                         "editable": a.get("editable"),
                         "role": a.get("role"),
+                        "kind": a.get("kind"),
                     }
                 )
         except (SkylightAuthError, SkylightAPIError) as err:

@@ -75,7 +75,7 @@ class SkylightBrightness(_SkylightFrameNumber):
     _attr_name = "Brightness"
     _attr_icon = "mdi:brightness-6"
     _attr_native_min_value = 0
-    _attr_native_max_value = 100
+    _attr_native_max_value = 255
     _attr_native_step = 1
     _attr_field = "brightness"
 
