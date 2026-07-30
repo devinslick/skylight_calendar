@@ -23,8 +23,22 @@ USER_AGENT = (
 CALENDAR_SCAN_INTERVAL = 300
 LISTS_SCAN_INTERVAL = 120
 SENSOR_SCAN_INTERVAL = 300
+FRAME_SCAN_INTERVAL = 600
+PHOTOS_SCAN_INTERVAL = 900
 
 # Platforms
 PLATFORM_CALENDAR = "calendar"
 PLATFORM_TODO = "todo"
 PLATFORM_SENSOR = "sensor"
+PLATFORM_IMAGE = "image"
+PLATFORM_SWITCH = "switch"
+PLATFORM_NUMBER = "number"
+
+# Meal category names (well-known IDs from Skylight production).
+# Used to break out per-slot meal sensors even when no meal is planned.
+MEAL_CATEGORY_NAMES = {
+    "9115870": "Breakfast",
+    "9115871": "Lunch",
+    "9115872": "Dinner",
+    "9115873": "Snack",
+}
