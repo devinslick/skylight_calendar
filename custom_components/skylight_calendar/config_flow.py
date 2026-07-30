@@ -1,178 +1,123 @@
-"""Config flow for Skylight integration."""
+"""Config flow for Skylight Calendar (manual OAuth2 token capture)."""
 
 from __future__ import annotations
 
-import base64
 import logging
+from typing import Any
 
-import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
-import homeassistant.helpers.config_validation as cv
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import BASE_URL, CONF_PASSWORD, CONF_USERNAME, DOMAIN
+from .api import SkylightAPI, SkylightAuthError, exchange_refresh_token
+from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_DEVICE_FINGERPRINT,
+    CONF_FRAME_ID,
+    CONF_FRAME_NAME,
+    CONF_REFRESH_TOKEN,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
+STEP_USER_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_ACCESS_TOKEN): str,
+        vol.Required(CONF_REFRESH_TOKEN): str,
+        vol.Optional(CONF_DEVICE_FINGERPRINT, default=""): str,
+    }
+)
+
 
 class SkylightConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Skylight."""
+    """Handle the manual-token OAuth2 config flow."""
 
-    VERSION = 1
+    VERSION = 2
 
-    def __init__(self):
-        self._auth_code = None
-        self._frames = []  # always store frames here
+    def __init__(self) -> None:
+        self._access_token: str = ""
+        self._refresh_token: str = ""
+        self._device_fingerprint: str = ""
+        self._frames: list[dict] = []
 
-    async def async_step_user(self, user_input=None):
-        """Initial login step."""
-
-        errors = {}
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        errors: dict[str, str] = {}
 
         if user_input is not None:
-            username = user_input[CONF_USERNAME]
-            password = user_input[CONF_PASSWORD]
+            session = async_get_clientsession(self.hass)
+            refresh = user_input[CONF_REFRESH_TOKEN].strip()
+            fingerprint = user_input.get(CONF_DEVICE_FINGERPRINT, "").strip()
 
             try:
-                resp_json = await self.getUserAuthSession(username, password)
+                new_pair = await exchange_refresh_token(session, refresh, fingerprint)
+            except SkylightAuthError as err:
+                _LOGGER.warning("Refresh token exchange failed: %s", err)
+                errors["base"] = "invalid_auth"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error verifying Skylight tokens")
+                errors["base"] = "cannot_connect"
 
-                if (
-                    isinstance(resp_json, dict)
-                    and "data" in resp_json
-                    and "attributes" in resp_json["data"]
-                    and "token" in resp_json["data"]["attributes"]
-                ):
-                    userToken = resp_json["data"]["attributes"]["token"]
-                    userId = resp_json["data"]["id"]
+            if not errors:
+                self._access_token = new_pair["access_token"]
+                self._refresh_token = new_pair["refresh_token"]
+                self._device_fingerprint = fingerprint
 
-                    # Build Basic Auth token
-                    auth_code = base64.b64encode(
-                        f"{userId}:{userToken}".encode()
-                    ).decode()
+                api = SkylightAPI(
+                    session=session,
+                    access_token=self._access_token,
+                    refresh_token=self._refresh_token,
+                    device_fingerprint=fingerprint,
+                )
+                try:
+                    self._frames = await api.get_frames()
+                except Exception:  # noqa: BLE001
+                    _LOGGER.exception("Failed to list frames")
+                    errors["base"] = "cannot_connect"
 
-                    # Verify login actually works
-                    status = await self._authenticate(auth_code)
-                    if status == 200:
-                        self._auth_code = auth_code
-
-                        # Fetch frames for this account
-                        frames = await self._fetch_frames(auth_code)
-                        if not frames:
-                            errors["base"] = "No frames found on this account."
-                        else:
-                            self._frames = frames
-                            return await self.async_step_select_frames()
+                if not errors:
+                    if not self._frames:
+                        errors["base"] = "no_frames"
+                    elif len(self._frames) == 1:
+                        return await self._create_entry(self._frames[0])
                     else:
-                        errors["base"] = "Authentication Failed"
-
-                else:
-                    errors["base"] = "Authentication Failed"
-
-            except Exception:
-                _LOGGER.exception("Error authenticating with Skylight API")
-                errors["base"] = "Connection Error"
+                        return await self.async_step_select_frame()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_USERNAME): str,
-                    vol.Required(CONF_PASSWORD): str,
-                }
-            ),
+            data_schema=STEP_USER_SCHEMA,
             errors=errors,
         )
 
-    async def async_step_select_frames(self, user_input=None):
-        """Select frames to include in Home Assistant."""
-        errors = {}
+    async def async_step_select_frame(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        if user_input is not None:
+            frame_id = user_input[CONF_FRAME_ID]
+            frame = next((f for f in self._frames if f["id"] == frame_id), None)
+            if frame:
+                return await self._create_entry(frame)
 
-        frame_options = {frame["id"]: frame["name"] for frame in self._frames}
-
-        if user_input:
-            selected_ids = user_input["What frames would you like to add?"]
-            selected_frames = [f for f in self._frames if f["id"] in selected_ids]
-
-            return self.async_create_entry(
-                title="Skylight Frames",
-                data={"auth_code": self._auth_code, "frame_data": selected_frames},
-            )
-
+        options = {f["id"]: f["name"] for f in self._frames}
         return self.async_show_form(
-            step_id="select_frames",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        "What frames would you like to add?", default=[]
-                    ): cv.multi_select(frame_options)
-                }
-            ),
-            errors=errors,
+            step_id="select_frame",
+            data_schema=vol.Schema({vol.Required(CONF_FRAME_ID): vol.In(options)}),
         )
 
-    async def _fetch_frames(self, auth_code: str):
-        """Fetch available frames (id + name)."""
-        url = f"{BASE_URL}/frames"
-        headers = {"Authorization": f"Basic {auth_code}"}
-
-        try:
-            async with aiohttp.ClientSession() as session:  # noqa: SIM117
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status != 200:
-                        return None
-
-                    data = await resp.json()
-
-                    frames = []
-                    for item in data.get("data", []):
-                        frame_id = item.get("id")
-                        name = item.get("attributes", {}).get("name")
-                        if frame_id and name:
-                            frames.append({"id": frame_id, "name": name})
-
-                    return frames
-
-        except Exception as e:
-            _LOGGER.error("Failed to fetch frames: %s", e)
-            return None
-
-    async def getUserAuthSession(self, email: str, password: str):
-        """Login → POST /sessions."""
-        url = f"{BASE_URL}/sessions"
-
-        data = {
-            "email": email,
-            "password": password,
-            "resettingPassword": "false",
-            "textMeTheApp": "false",
-            "agreedToMarketing": "false",
-        }
-
-        headers = {
-            "accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-
-        try:
-            async with aiohttp.ClientSession() as session:  # noqa: SIM117
-                async with session.post(url, data=data, headers=headers) as resp:
-                    return await resp.json()
-
-        except Exception as e:
-            _LOGGER.error("Skylight POST /sessions failed: %s", e)
-            return {}
-
-    async def _authenticate(self, auth_code: str):
-        """Verify Basic Auth token works."""
-        url = f"{BASE_URL}/frames"
-        headers = {"Authorization": f"Basic {auth_code}"}
-
-        try:
-            async with aiohttp.ClientSession() as session:  # noqa: SIM117
-                async with session.get(url, headers=headers) as resp:
-                    return resp.status
-
-        except Exception as e:
-            _LOGGER.error("Skylight auth check failed: %s", e)
-            return 0
+    async def _create_entry(self, frame: dict) -> FlowResult:
+        await self.async_set_unique_id(f"skylight_frame_{frame['id']}")
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=frame["name"],
+            data={
+                CONF_ACCESS_TOKEN: self._access_token,
+                CONF_REFRESH_TOKEN: self._refresh_token,
+                CONF_DEVICE_FINGERPRINT: self._device_fingerprint,
+                CONF_FRAME_ID: frame["id"],
+                CONF_FRAME_NAME: frame["name"],
+            },
+        )

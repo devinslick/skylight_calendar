@@ -1,92 +1,105 @@
-"""setup skylight_calendar integration."""
+"""The Skylight Calendar integration."""
+
+from __future__ import annotations
 
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import SkylightAPI
-from .const import DOMAIN
+from .const import (
+    CONF_ACCESS_TOKEN,
+    CONF_DEVICE_FINGERPRINT,
+    CONF_FRAME_ID,
+    CONF_FRAME_NAME,
+    CONF_REFRESH_TOKEN,
+    DOMAIN,
+    PLATFORM_CALENDAR,
+    PLATFORM_SENSOR,
+    PLATFORM_TODO,
+)
+from .coordinator import (
+    SkylightCalendarCoordinator,
+    SkylightListsCoordinator,
+    SkylightSensorCoordinator,
+)
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = ["calendar"]
+
+PLATFORMS = [PLATFORM_CALENDAR, PLATFORM_TODO, PLATFORM_SENSOR]
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
-    auth_code = entry.data.get("auth_code")
-    stored_frames = entry.data.get("frame_data", [])
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up a Skylight frame from a config entry."""
+    session = async_get_clientsession(hass)
 
-    if not auth_code:
-        _LOGGER.error("Skylight auth_code missing — cannot load integration")
+    access_token = entry.data.get(CONF_ACCESS_TOKEN)
+    refresh_token = entry.data.get(CONF_REFRESH_TOKEN)
+    device_fp = entry.data.get(CONF_DEVICE_FINGERPRINT, "")
+    frame_id = entry.data.get(CONF_FRAME_ID)
+    frame_name = entry.data.get(CONF_FRAME_NAME) or f"Skylight Frame {frame_id}"
+
+    if not access_token or not refresh_token or not frame_id:
+        _LOGGER.error(
+            "Skylight config entry incomplete (missing tokens or frame_id) — "
+            "please remove and re-add the integration"
+        )
         return False
 
-    api = SkylightAPI({"auth_code": auth_code}, hass=hass)
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"api": api}
+    async def _persist_tokens(new_access: str, new_refresh: str, new_fp: str | None) -> None:
+        new_data = {
+            **entry.data,
+            CONF_ACCESS_TOKEN: new_access,
+            CONF_REFRESH_TOKEN: new_refresh,
+        }
+        if new_fp:
+            new_data[CONF_DEVICE_FINGERPRINT] = new_fp
+        hass.config_entries.async_update_entry(entry, data=new_data)
 
-    # Fetch live frames from Skylight API
+    api = SkylightAPI(
+        session=session,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        device_fingerprint=device_fp,
+        token_update_cb=_persist_tokens,
+    )
 
-    try:
-        live_frames = await api.get_frames()
-    except Exception as e:
-        _LOGGER.error("Failed to fetch frames from Skylight API: %s", e)
-        live_frames = stored_frames  # fallback
+    calendar_coord = SkylightCalendarCoordinator(hass, api, frame_id)
+    lists_coord = SkylightListsCoordinator(hass, api, frame_id)
+    sensor_coord = SkylightSensorCoordinator(hass, api, frame_id)
 
-    stored_ids = {f["id"] for f in stored_frames}
-    live_ids = {f["id"] for f in live_frames}
+    await calendar_coord.async_config_entry_first_refresh()
+    await lists_coord.async_config_entry_first_refresh()
+    await sensor_coord.async_config_entry_first_refresh()
 
-    new_ids = live_ids - stored_ids
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+        "api": api,
+        "frame_id": frame_id,
+        "frame_name": frame_name,
+        "calendar_coordinator": calendar_coord,
+        "lists_coordinator": lists_coord,
+        "sensor_coordinator": sensor_coord,
+    }
 
-    if new_ids:
-        new_frames = [f for f in live_frames if f["id"] in new_ids]
-        _LOGGER.warning("New Skylight frames detected: %s", new_frames)
-
-        updated_frames = stored_frames + new_frames
-
-        # Save back into the config entry
-        hass.config_entries.async_update_entry(
-            entry,
-            data={
-                **entry.data,
-                "frame_data": updated_frames,
-            },
-        )
-        stored_frames = updated_frames  # use updated list
-
-        _LOGGER.warning("Config entry updated with new frames")
-
-    # Deduplicate frames by ID
-
-    seen_ids = set()
-    unique_frames = []
-    for frame in stored_frames:
-        if frame["id"] not in seen_ids:
-            seen_ids.add(frame["id"])
-            unique_frames.append(frame)
-
-    # Create Home Assistant devices for each frame
     device_registry = dr.async_get(hass)
-    for frame in unique_frames:
-        device_registry.async_get_or_create(
-            config_entry_id=entry.entry_id,
-            identifiers={(DOMAIN, frame["id"])},
-            manufacturer="Skylight",
-            name=frame.get("name", f"Skylight Frame {frame['id']}"),
-            model="Calendar Frame",
-        )
-
-    # Forward to platforms
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, frame_id)},
+        manufacturer="Skylight",
+        name=frame_name,
+        model="Calendar Frame",
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
-    unload_ok = all(
-        [
-            await hass.config_entries.async_forward_entry_unload(entry, platform)
-            for platform in PLATFORMS
-        ]
-    )
-    hass.data[DOMAIN].pop(entry.entry_id, None)
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
