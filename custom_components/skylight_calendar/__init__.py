@@ -18,18 +18,30 @@ from .const import (
     CONF_REFRESH_TOKEN,
     DOMAIN,
     PLATFORM_CALENDAR,
+    PLATFORM_IMAGE,
+    PLATFORM_NUMBER,
     PLATFORM_SENSOR,
+    PLATFORM_SWITCH,
     PLATFORM_TODO,
 )
 from .coordinator import (
     SkylightCalendarCoordinator,
+    SkylightFrameCoordinator,
     SkylightListsCoordinator,
+    SkylightPhotosCoordinator,
     SkylightSensorCoordinator,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = [PLATFORM_CALENDAR, PLATFORM_TODO, PLATFORM_SENSOR]
+PLATFORMS = [
+    PLATFORM_CALENDAR,
+    PLATFORM_TODO,
+    PLATFORM_SENSOR,
+    PLATFORM_IMAGE,
+    PLATFORM_SWITCH,
+    PLATFORM_NUMBER,
+]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -70,10 +82,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     calendar_coord = SkylightCalendarCoordinator(hass, api, frame_id)
     lists_coord = SkylightListsCoordinator(hass, api, frame_id)
     sensor_coord = SkylightSensorCoordinator(hass, api, frame_id)
+    frame_coord = SkylightFrameCoordinator(hass, api, frame_id)
+    photos_coord = SkylightPhotosCoordinator(hass, api, frame_id)
 
     await calendar_coord.async_config_entry_first_refresh()
     await lists_coord.async_config_entry_first_refresh()
     await sensor_coord.async_config_entry_first_refresh()
+    await frame_coord.async_config_entry_first_refresh()
+    # Photos are optional — don't fail entry setup if the feed 500s.
+    try:
+        await photos_coord.async_config_entry_first_refresh()
+    except Exception:  # noqa: BLE001
+        _LOGGER.debug("Initial photos refresh failed — continuing without photos")
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "api": api,
@@ -82,6 +102,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "calendar_coordinator": calendar_coord,
         "lists_coordinator": lists_coord,
         "sensor_coordinator": sensor_coord,
+        "frame_coordinator": frame_coord,
+        "photos_coordinator": photos_coord,
     }
 
     device_registry = dr.async_get(hass)

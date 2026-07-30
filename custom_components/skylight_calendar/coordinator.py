@@ -13,7 +13,9 @@ from .api import SkylightAPI, SkylightAPIError, SkylightAuthError
 from .const import (
     CALENDAR_SCAN_INTERVAL,
     DOMAIN,
+    FRAME_SCAN_INTERVAL,
     LISTS_SCAN_INTERVAL,
+    PHOTOS_SCAN_INTERVAL,
     SENSOR_SCAN_INTERVAL,
 )
 
@@ -21,7 +23,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class SkylightCalendarCoordinator(DataUpdateCoordinator):
-    """Fetch calendar events for a rolling window centered on today."""
+    """Fetch calendar events + source_calendars for splitting into per-calendar entities."""
 
     def __init__(self, hass: HomeAssistant, api: SkylightAPI, frame_id: str) -> None:
         super().__init__(
@@ -39,13 +41,34 @@ class SkylightCalendarCoordinator(DataUpdateCoordinator):
         date_max = (today + timedelta(days=60)).isoformat()
         tz = getattr(self.hass.config, "time_zone", "UTC") or "UTC"
         try:
-            return await self.api.get_calendar_events(
+            events = await self.api.get_calendar_events(
                 self.frame_id, date_min, date_max, timezone=tz
             )
         except SkylightAuthError as err:
             raise UpdateFailed(f"Auth failed: {err}") from err
         except SkylightAPIError as err:
             raise UpdateFailed(str(err)) from err
+
+        # Best-effort source_calendars fetch (used to split into per-calendar entities).
+        source_calendars: list[dict] = []
+        try:
+            sc_resp = await self.api.get_source_calendars(self.frame_id)
+            for entry in sc_resp.get("data", []):
+                a = entry.get("attributes", {})
+                source_calendars.append(
+                    {
+                        "id": str(entry.get("id")),
+                        "name": a.get("label") or a.get("name") or a.get("source_id") or a.get("email") or f"Calendar {entry.get('id')}",
+                        "email": a.get("source_id") or a.get("email"),
+                        "editable": a.get("editable"),
+                        "role": a.get("role"),
+                        "kind": a.get("kind"),
+                    }
+                )
+        except (SkylightAuthError, SkylightAPIError) as err:
+            _LOGGER.debug("source_calendars fetch failed: %s", err)
+
+        return {"events": events, "source_calendars": source_calendars}
 
 
 class SkylightListsCoordinator(DataUpdateCoordinator):
@@ -79,8 +102,6 @@ class SkylightListsCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Failed to fetch items for list %s: %s", lid, err)
                 continue
             items = []
-            # Skylight uses "label" for the item text and the include payload
-            # may be the top-level `included` array OR embedded via relationships.
             for inc in detail.get("included", []) or []:
                 if inc.get("type") != "list_item":
                     continue
@@ -105,7 +126,7 @@ class SkylightListsCoordinator(DataUpdateCoordinator):
 
 
 class SkylightSensorCoordinator(DataUpdateCoordinator):
-    """Aggregate chores + meals + rewards + categories for sensors."""
+    """Aggregate chores + meals + rewards + categories for sensors and per-member todos."""
 
     def __init__(self, hass: HomeAssistant, api: SkylightAPI, frame_id: str) -> None:
         super().__init__(
@@ -120,7 +141,12 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         today = dt_util.now().date()
         week_end = (today + timedelta(days=7)).isoformat()
-        result: dict = {"chores": None, "meals": None, "reward_points": None, "categories": None}
+        result: dict = {
+            "chores": None,
+            "meals": None,
+            "reward_points": None,
+            "categories": None,
+        }
         try:
             result["chores"] = await self.api.get_chores(
                 self.frame_id, today.isoformat(), week_end
@@ -142,3 +168,51 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
         except (SkylightAuthError, SkylightAPIError) as err:
             _LOGGER.debug("categories fetch failed: %s", err)
         return result
+
+
+class SkylightFrameCoordinator(DataUpdateCoordinator):
+    """Fetch frame settings (brightness, sleep_mode_on, slideshow_speed, name...)."""
+
+    def __init__(self, hass: HomeAssistant, api: SkylightAPI, frame_id: str) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN} frame {frame_id}",
+            update_interval=timedelta(seconds=FRAME_SCAN_INTERVAL),
+        )
+        self.api = api
+        self.frame_id = frame_id
+
+    async def _async_update_data(self) -> dict:
+        try:
+            resp = await self.api.get_frame(self.frame_id)
+        except SkylightAuthError as err:
+            raise UpdateFailed(f"Auth failed: {err}") from err
+        except SkylightAPIError as err:
+            raise UpdateFailed(str(err)) from err
+        return resp.get("data", {}).get("attributes", {}) or {}
+
+
+class SkylightPhotosCoordinator(DataUpdateCoordinator):
+    """Fetch latest frame photos (messages feed)."""
+
+    def __init__(self, hass: HomeAssistant, api: SkylightAPI, frame_id: str) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN} photos {frame_id}",
+            update_interval=timedelta(seconds=PHOTOS_SCAN_INTERVAL),
+        )
+        self.api = api
+        self.frame_id = frame_id
+
+    async def _async_update_data(self) -> list[dict]:
+        try:
+            resp = await self.api.get_messages(self.frame_id)
+        except SkylightAuthError as err:
+            raise UpdateFailed(f"Auth failed: {err}") from err
+        except SkylightAPIError as err:
+            # Photos are non-critical — don't kill the whole entry over this.
+            _LOGGER.debug("photos fetch failed: %s", err)
+            return []
+        return resp.get("data", []) if isinstance(resp, dict) else []

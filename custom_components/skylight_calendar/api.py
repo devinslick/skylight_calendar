@@ -1,14 +1,4 @@
-"""Async Skylight API client with OAuth2 Bearer + refresh_token cascade.
-
-Skylight migrated from Basic-auth `POST /api/sessions` (returning a legacy
-user token) to an OAuth2 flow: manually captured `access_token` /
-`refresh_token` from the browser, `Skylight-Api-Version: 2026-05-01`
-header, and automatic refresh on 401.
-
-The refresh token is rotated on every use — the API returns a new pair
-each time. We persist the rotated pair back to the config entry via a
-caller-supplied callback so the next HA restart uses the fresh tokens.
-"""
+"""Async Skylight API client with OAuth2 Bearer + refresh_token cascade."""
 
 from __future__ import annotations
 
@@ -89,7 +79,7 @@ class SkylightAPI:
             headers=headers,
             params=clean_params,
             json=json_body,
-            timeout=aiohttp.ClientTimeout(total=15),
+            timeout=aiohttp.ClientTimeout(total=20),
         ) as resp:
             if resp.status == 401 and _retry:
                 _LOGGER.debug("Skylight 401 on %s — refreshing token", path)
@@ -171,6 +161,11 @@ class SkylightAPI:
     async def get_frame(self, frame_id: str) -> dict:
         return await self._request("GET", f"/api/frames/{frame_id}")
 
+    async def patch_frame(self, frame_id: str, attributes: dict) -> dict:
+        """PATCH frame attributes (brightness, sleep_mode_on, slideshow_speed, etc.)."""
+        body = {"data": {"type": "frame", "id": frame_id, "attributes": attributes}}
+        return await self._request("PATCH", f"/api/frames/{frame_id}", json_body=body)
+
     async def get_calendar_events(
         self, frame_id: str, date_min: str, date_max: str, timezone: str = "UTC"
     ) -> dict:
@@ -222,11 +217,33 @@ class SkylightAPI:
         )
 
     async def get_chores(self, frame_id: str, after: str, before: str) -> dict:
-        """Skylight chores endpoint uses after/before (inclusive), not date_min/date_max."""
         return await self._request(
             "GET",
             f"/api/frames/{frame_id}/chores",
             params={"after": after, "before": before, "include_late": "true"},
+        )
+
+    async def complete_chore(self, frame_id: str, chore_id: str) -> dict:
+        """Mark a chore complete (JSON:API PUT)."""
+        body = {
+            "data": {
+                "type": "chore",
+                "id": chore_id,
+                "attributes": {"status": "completed"},
+            }
+        }
+        return await self._request(
+            "PUT", f"/api/frames/{frame_id}/chores/{chore_id}", json_body=body
+        )
+
+    async def update_chore_status(
+        self, frame_id: str, chore_id: str, status: str
+    ) -> dict:
+        body = {
+            "data": {"type": "chore", "id": chore_id, "attributes": {"status": status}}
+        }
+        return await self._request(
+            "PUT", f"/api/frames/{frame_id}/chores/{chore_id}", json_body=body
         )
 
     async def get_meals(self, frame_id: str, date_min: str, date_max: str) -> dict:
@@ -245,6 +262,14 @@ class SkylightAPI:
 
     async def get_rewards(self, frame_id: str) -> dict:
         return await self._request("GET", f"/api/frames/{frame_id}/rewards")
+
+    async def get_messages(self, frame_id: str, page_token: str = "__START__") -> dict:
+        """Photo/message feed."""
+        return await self._request(
+            "GET",
+            f"/api/frames/{frame_id}/messages",
+            params={"page_token": page_token},
+        )
 
 
 async def exchange_refresh_token(
@@ -286,4 +311,59 @@ async def exchange_refresh_token(
     return {
         "access_token": data["access_token"],
         "refresh_token": data.get("refresh_token", refresh_token),
+    }
+
+
+async def exchange_authorization_code(
+    session: aiohttp.ClientSession,
+    code: str,
+    code_verifier: str,
+    device_fingerprint: str = "",
+) -> dict:
+    """OAuth2 authorization_code + PKCE exchange used by the config flow.
+
+    The Skylight OAuth server only allows one registered redirect URI
+    (``https://ourskylight.com/welcome``), so we always pass that back — the
+    server never actually redirects there during the HA flow; the user copies
+    the ``?code=...`` value out of their browser's address bar.
+    """
+    from .const import OAUTH_REDIRECT_URI
+
+    payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": CLIENT_ID,
+        "redirect_uri": OAUTH_REDIRECT_URI,
+        "code_verifier": code_verifier,
+        "scope": "everything",
+        "source": "js-mobile",
+        "skylight_api_client_device_fingerprint": device_fingerprint,
+        "skylight_api_client_device_platform": "web",
+        "skylight_api_client_device_name": "home-assistant",
+        "skylight_api_client_device_os_version": "unknown",
+        "skylight_api_client_device_app_version": "unknown",
+        "skylight_api_client_device_hardware": "3",
+    }
+    headers = {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json",
+        "User-Agent": USER_AGENT,
+    }
+    async with session.post(
+        OAUTH_URL,
+        data=payload,
+        headers=headers,
+        timeout=aiohttp.ClientTimeout(total=15),
+    ) as resp:
+        text = await resp.text()
+        if resp.status != 200:
+            raise SkylightAuthError(
+                f"Authorization code exchange failed ({resp.status}): {text[:200]}"
+            )
+        data = _json.loads(text)
+    if not data.get("access_token") or not data.get("refresh_token"):
+        raise SkylightAuthError(f"Code exchange: missing tokens: {data}")
+    return {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
     }
