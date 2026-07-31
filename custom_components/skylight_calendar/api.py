@@ -17,6 +17,110 @@ _LOGGER = logging.getLogger(__name__)
 TokenUpdateCallback = Callable[[str, str, str | None], Awaitable[None]]
 
 
+def _sigv4_sign(
+    method: str,
+    url: str,
+    headers: dict,
+    body: bytes,
+    access_key: str,
+    secret_key: str,
+    session_token: str,
+    region: str = "us-east-1",
+    service: str = "s3",
+) -> dict:
+    """AWS SigV4 sign an S3 upload PUT.
+
+    Skylight's S3 bucket policy requires signing amz-sdk-invocation-id,
+    amz-sdk-request, if-none-match, and x-amz-user-agent in addition to the
+    standard SigV4 headers — omitting any results in 403 AccessDenied. This
+    mirrors the exact header set sent by aws-sdk-js/3.928.0 in the browser.
+    """
+    import hashlib
+    import hmac
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    from urllib.parse import quote, urlparse
+
+    parsed = urlparse(url)
+    host = parsed.netloc
+    path = parsed.path or "/"
+    query = parsed.query
+
+    now = datetime.now(tz=timezone.utc)
+    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+    payload_hash = hashlib.sha256(body).hexdigest()
+    invocation_id = str(_uuid.uuid4())
+
+    to_sign = {
+        "amz-sdk-invocation-id": invocation_id,
+        "amz-sdk-request": "attempt=1; max=3",
+        "content-type": headers.get("Content-Type", "application/octet-stream"),
+        "host": host,
+        "if-none-match": "*",
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+        "x-amz-security-token": session_token,
+        "x-amz-user-agent": (
+            "aws-sdk-js/3.928.0 ua/2.1 os/Windows lang/js "
+            "md/browser#Firefox_unknown api/s3#3.928.0 m/a,b,E,e"
+        ),
+    }
+    canonical_headers = "".join(f"{k}:{v}\n" for k, v in sorted(to_sign.items()))
+    signed_headers_str = ";".join(sorted(to_sign.keys()))
+
+    canonical_qs = (
+        "&".join(
+            f"{quote(k, safe='')}={quote(v, safe='')}"
+            for k, v in sorted(p.split("=", 1) for p in query.split("&") if p)
+        )
+        if query
+        else ""
+    )
+
+    canonical_request = "\n".join(
+        [method, path, canonical_qs, canonical_headers, signed_headers_str, payload_hash]
+    )
+    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
+    string_to_sign = "\n".join(
+        [
+            "AWS4-HMAC-SHA256",
+            amz_date,
+            credential_scope,
+            hashlib.sha256(canonical_request.encode()).hexdigest(),
+        ]
+    )
+
+    def _hmac(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+    signing_key = _hmac(
+        _hmac(
+            _hmac(_hmac(f"AWS4{secret_key}".encode(), date_stamp), region),
+            service,
+        ),
+        "aws4_request",
+    )
+    signature = hmac.new(
+        signing_key, string_to_sign.encode(), hashlib.sha256
+    ).hexdigest()
+
+    return {
+        **headers,
+        "Authorization": (
+            f"AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, "
+            f"SignedHeaders={signed_headers_str}, Signature={signature}"
+        ),
+        "amz-sdk-invocation-id": invocation_id,
+        "amz-sdk-request": "attempt=1; max=3",
+        "if-none-match": "*",
+        "x-amz-content-sha256": payload_hash,
+        "x-amz-date": amz_date,
+        "x-amz-security-token": session_token,
+        "x-amz-user-agent": to_sign["x-amz-user-agent"],
+    }
+
+
 class SkylightAuthError(Exception):
     """Raised when authentication fails and cannot be recovered."""
 
@@ -300,6 +404,81 @@ class SkylightAPI:
     async def get_recipe(self, frame_id: str, recipe_id: str) -> dict:
         return await self._request(
             "GET", f"/api/frames/{frame_id}/meals/recipes/{recipe_id}"
+        )
+
+    async def get_cloud_upload_credentials(self) -> dict:
+        """Fetch short-lived S3 credentials for uploading media."""
+        return await self._request("GET", "/api/messages/cloud_upload_credentials")
+
+    async def notify_media_upload(
+        self,
+        frame_ids: list[str],
+        bucket: str,
+        key: str,
+        etag: str,
+        ext: str,
+        caption: str = "",
+    ) -> dict:
+        """Register a completed S3 upload with Skylight → creates message_status records."""
+        body = {
+            "file_upload": {"bucket": bucket, "etag": f'"{etag}"', "key": key},
+            "frame_ids": [str(f) for f in frame_ids],
+            "caption": caption,
+            "ext": ext,
+        }
+        return await self._request("POST", "/api/messages/uploads", json_body=body)
+
+    async def upload_media(
+        self,
+        frame_ids: list[str],
+        file_data: bytes,
+        ext: str,
+        content_type: str,
+        caption: str = "",
+    ) -> dict:
+        """End-to-end upload: cloud creds → SigV4 PUT to S3 → notify Skylight.
+
+        Returns the notify_media_upload response containing ``data.message_ids``.
+        """
+        import uuid as _uuid
+
+        creds_resp = await self.get_cloud_upload_credentials()
+        creds = creds_resp["data"]["credentials"]
+        bucket = creds_resp["data"]["bucket"]
+        region = creds_resp["data"]["region"]
+        prefix = creds_resp["data"]["key_prefix"].rstrip("/")
+        key = f"{prefix}/{_uuid.uuid4()}.{ext}"
+        s3_url = f"https://{bucket}.s3.{region}.amazonaws.com/{key}?x-id=PutObject"
+
+        put_headers = _sigv4_sign(
+            "PUT",
+            s3_url,
+            headers={"Content-Type": content_type},
+            body=file_data,
+            access_key=creds["access_key_id"],
+            secret_key=creds["secret_access_key"],
+            session_token=creds["session_token"],
+            region=region,
+        )
+        put_headers["Content-Length"] = str(len(file_data))
+
+        async with self._session.put(
+            s3_url, data=file_data, headers=put_headers
+        ) as resp:
+            if resp.status not in (200, 204):
+                text = await resp.text()
+                raise SkylightAPIError(
+                    f"S3 upload failed {resp.status}: {text[:200]}"
+                )
+            etag = (resp.headers.get("ETag") or "").strip('"')
+
+        return await self.notify_media_upload(
+            frame_ids=frame_ids,
+            bucket=bucket,
+            key=key,
+            etag=etag,
+            ext=ext,
+            caption=caption,
         )
 
     async def get_messages(self, frame_id: str, page_token: str = "__START__") -> dict:
