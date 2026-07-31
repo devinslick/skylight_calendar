@@ -1,6 +1,6 @@
-# Skylight Calendar for Home Assistant
+# Skylight for Home Assistant
 
-Integrate your [Skylight Frame](https://www.ourskylight.com/) into Home Assistant — calendar events, chores, meals, shopping/to-do lists, and reward stars.
+Integrate your [Skylight](https://www.ourskylight.com/) into Home Assistant — calendar events, chores, meals, shopping/to-do lists, and reward stars.
 
 > **v2.1.0.** Skylight uses OAuth2. Home Assistant now handles the whole handshake — click a link, sign in on Skylight's own page, paste the authorization code back into Home Assistant. No browser DevTools, no manually copying tokens. HA rotates the refresh token automatically forever after that.
 
