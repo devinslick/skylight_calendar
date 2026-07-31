@@ -72,8 +72,12 @@ class SkylightLatestPhoto(
             self._current_url = None
             return
         attrs = item.get("attributes", item) or {}
+        # Skylight uses `asset_url` (full-size CloudFront URL) as the canonical
+        # image location. `thumbnail_url` is the sized preview. Fallbacks kept
+        # for defensive parity with older payload shapes.
         url = (
-            attrs.get("url")
+            attrs.get("asset_url")
+            or attrs.get("url")
             or attrs.get("image_url")
             or attrs.get("thumbnail_url")
         )
@@ -92,6 +96,10 @@ class SkylightLatestPhoto(
             "id": item.get("id"),
             "caption": attrs.get("caption"),
             "created_at": attrs.get("created_at"),
+            "status": attrs.get("status"),
+            "asset_type": attrs.get("asset_type"),
+            "thumbnail_url": attrs.get("thumbnail_url"),
+            "sender_id": attrs.get("sender_id"),
         }
 
     def _handle_coordinator_update(self) -> None:

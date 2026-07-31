@@ -27,6 +27,7 @@ Full [Skylight Calendar Frame](https://www.ourskylight.com/) integration for Hom
 | `sensor.<frame>_breakfast_today`<br>`sensor.<frame>_lunch_today`<br>`sensor.<frame>_dinner_today`<br>`sensor.<frame>_snack_today` | comma-joined meal names, or `"none"` | Full per-meal detail in `meals[]` |
 | `sensor.<person>_stars` | current star balance | Per family member |
 | `sensor.<frame>_task_box` | count | `items[]` — reusable chore templates the frame pulls from when adding an ad-hoc chore (summary, emoji, reward_points, routine) |
+| `image.<frame>_latest_photo` | most recent photo | Skylight scopes `/messages` to the authenticated user — you only see photos uploaded by the account HA authorized with, not photos from other family members using the same frame. |
 
 ---
 
