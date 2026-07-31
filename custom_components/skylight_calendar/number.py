@@ -107,8 +107,8 @@ class SkylightBrightness(_SkylightFrameNumber):
 class SkylightSlideshowSpeed(_SkylightFrameNumber):
     _attr_name = "Slideshow speed"
     _attr_icon = "mdi:timer-outline"
-    _attr_native_min_value = 1
-    _attr_native_max_value = 300
+    _attr_native_min_value = 0
+    _attr_native_max_value = 240
     _attr_native_step = 1
     _attr_field = "slideshow_speed"
     _attr_native_unit_of_measurement = "s"
