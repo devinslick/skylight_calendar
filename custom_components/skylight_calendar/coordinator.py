@@ -120,7 +120,14 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         today = dt_util.now().date()
         week_end = (today + timedelta(days=7)).isoformat()
-        result: dict = {"chores": None, "meals": None, "reward_points": None, "categories": None}
+        result: dict = {
+            "chores": None,
+            "meals": None,
+            "meals_included": [],
+            "reward_points": None,
+            "categories": None,
+            "task_box": None,
+        }
         try:
             result["chores"] = await self.api.get_chores(
                 self.frame_id, today.isoformat(), week_end
@@ -128,9 +135,13 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
         except (SkylightAuthError, SkylightAPIError) as err:
             _LOGGER.debug("chores fetch failed: %s", err)
         try:
-            result["meals"] = await self.api.get_meals(
+            meals = await self.api.get_meals(
                 self.frame_id, today.isoformat(), week_end
             )
+            result["meals"] = meals
+            # Extract included meal_category + meal_recipe lookup tables
+            if isinstance(meals, dict):
+                result["meals_included"] = meals.get("included", []) or []
         except (SkylightAuthError, SkylightAPIError) as err:
             _LOGGER.debug("meals fetch failed: %s", err)
         try:
@@ -141,4 +152,8 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
             result["categories"] = await self.api.get_categories(self.frame_id)
         except (SkylightAuthError, SkylightAPIError) as err:
             _LOGGER.debug("categories fetch failed: %s", err)
+        try:
+            result["task_box"] = await self.api.get_task_box(self.frame_id)
+        except (SkylightAuthError, SkylightAPIError) as err:
+            _LOGGER.debug("task_box fetch failed: %s", err)
         return result

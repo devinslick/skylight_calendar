@@ -246,6 +246,15 @@ class SkylightAPI:
     async def get_rewards(self, frame_id: str) -> dict:
         return await self._request("GET", f"/api/frames/{frame_id}/rewards")
 
+    async def get_task_box(self, frame_id: str) -> dict:
+        """Reusable chore-template items (frame's 'Task Box')."""
+        return await self._request("GET", f"/api/frames/{frame_id}/task_box/items")
+
+    async def get_recipe(self, frame_id: str, recipe_id: str) -> dict:
+        return await self._request(
+            "GET", f"/api/frames/{frame_id}/meals/recipes/{recipe_id}"
+        )
+
 
 async def exchange_refresh_token(
     session: aiohttp.ClientSession,
