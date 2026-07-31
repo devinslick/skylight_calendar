@@ -50,7 +50,87 @@ async def async_setup_entry(
             SkylightMealSlotSensor(coord, frame_id, frame_name, cat_id, label)
         )
 
+    # Task Box — reusable chore-template pool
+    entities.append(SkylightTaskBoxSensor(coord, frame_id, frame_name))
+
     async_add_entities(entities)
+
+
+def _category_label_map(data: dict) -> dict[str, str]:
+    """category_id -> label lookup covering all categories (profiles + calendar buckets)."""
+    cats = (data.get("categories") or {}).get("data", [])
+    return {
+        str(c.get("id")): c.get("attributes", {}).get("label", "")
+        for c in cats
+    }
+
+
+def _enrich_chore(c: dict, cat_map: dict[str, str]) -> dict[str, Any]:
+    """Full detail record for a chore — for Lovelace/automation templates."""
+    attrs = c.get("attributes", {}) if isinstance(c, dict) else {}
+    rrules = attrs.get("recurrence_set") or []
+    rrule = rrules[0] if rrules else None
+    cat_id = _chore_assignee_id(c)
+    return {
+        "id": c.get("id"),
+        "summary": attrs.get("summary") or attrs.get("name"),
+        "description": attrs.get("description"),
+        "emoji": attrs.get("emoji_icon"),
+        "status": attrs.get("status"),
+        "reward_points": attrs.get("reward_points"),
+        "start_date": _chore_when(attrs),
+        "start_time": attrs.get("start_time"),
+        "completed_on": attrs.get("completed_on"),
+        "completed_at": attrs.get("completed_at"),
+        "recurring": attrs.get("recurring"),
+        "recurrence_rrule": rrule,
+        "routine": attrs.get("routine"),
+        "up_for_grabs": attrs.get("up_for_grabs"),
+        "timer_seconds": attrs.get("timer_seconds"),
+        "assignee_id": cat_id,
+        "assignee": cat_map.get(str(cat_id)) if cat_id else None,
+    }
+
+
+def _meal_included_maps(data: dict) -> tuple[dict[str, dict], dict[str, dict]]:
+    """Return (meal_category_by_id, meal_recipe_by_id) from included payload."""
+    inc = (data or {}).get("meals_included") or []
+    cats = {str(i["id"]): i for i in inc if i.get("type") == "meal_category"}
+    recipes = {str(i["id"]): i for i in inc if i.get("type") == "meal_recipe"}
+    return cats, recipes
+
+
+def _enrich_meal(
+    m: dict, cats: dict[str, dict], recipes: dict[str, dict]
+) -> dict[str, Any]:
+    attrs = m.get("attributes", {}) if isinstance(m, dict) else {}
+    rels = m.get("relationships", {}) or {}
+    cat_id = ((rels.get("meal_category") or {}).get("data") or {}).get("id")
+    recipe_id = ((rels.get("meal_recipe") or {}).get("data") or {}).get("id")
+    cat_label = None
+    recipe_title = None
+    recipe_desc = None
+    if cat_id and str(cat_id) in cats:
+        cat_label = cats[str(cat_id)].get("attributes", {}).get("label")
+    if recipe_id and str(recipe_id) in recipes:
+        r_attrs = recipes[str(recipe_id)].get("attributes", {})
+        recipe_title = r_attrs.get("summary")
+        recipe_desc = r_attrs.get("description")
+    return {
+        "id": m.get("id"),
+        "summary": attrs.get("summary"),
+        "description": attrs.get("description"),
+        "note": attrs.get("note"),
+        "date": _meal_when(attrs),
+        "category_id": cat_id,
+        "category": cat_label or MEAL_CATEGORY_NAMES.get(str(cat_id or ""), "Other"),
+        "recipe_id": recipe_id,
+        "recipe_title": recipe_title,
+        "recipe_description": recipe_desc,
+        "recurring": attrs.get("recurring"),
+        "recurrence_rrule": attrs.get("rrule"),
+        "instances": attrs.get("instances"),
+    }
 
 
 def _profile_categories(data: dict) -> list[tuple[str, str]]:
@@ -99,7 +179,20 @@ def _chore_when(attrs: dict) -> str:
 
 
 def _meal_when(attrs: dict) -> str:
+    """Legacy single-date field. Prefer `_meal_scheduled_for_today` for filtering."""
     return attrs.get("date") or attrs.get("starts_at") or ""
+
+
+def _meal_scheduled_for_today(attrs: dict, today: str) -> bool:
+    """Skylight schedules recurring meals via `instances: [ISO-date, ...]`.
+
+    Falls back to the legacy `date`/`starts_at` field for non-recurring meals.
+    """
+    instances = attrs.get("instances") or []
+    if today in instances:
+        return True
+    when = _meal_when(attrs)
+    return isinstance(when, str) and when.startswith(today)
 
 
 def _meal_category_id(m: dict) -> str | None:
@@ -162,20 +255,11 @@ class SkylightChoresTodaySensor(_SkylightBaseSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         chores = self._today_chores()
-        result = []
-        for c in chores:
-            attrs = c.get("attributes", {}) if isinstance(c, dict) else {}
-            result.append(
-                {
-                    "id": c.get("id"),
-                    "summary": attrs.get("summary") or attrs.get("name"),
-                    "status": attrs.get("status"),
-                    "reward_points": attrs.get("reward_points"),
-                    "start": _chore_when(attrs),
-                    "assignee_id": _chore_assignee_id(c),
-                }
-            )
-        return {"chores": result, "by_status": _status_breakdown(chores)}
+        cat_map = _category_label_map(self.coordinator.data or {})
+        return {
+            "chores": [_enrich_chore(c, cat_map) for c in chores],
+            "by_status": _status_breakdown(chores),
+        }
 
 
 class SkylightMemberChoresSensor(_SkylightBaseSensor):
@@ -208,18 +292,9 @@ class SkylightMemberChoresSensor(_SkylightBaseSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         chores = self._member_chores()
+        cat_map = _category_label_map(self.coordinator.data or {})
         return {
-            "chores": [
-                {
-                    "id": c.get("id"),
-                    "summary": (c.get("attributes") or {}).get("summary")
-                    or (c.get("attributes") or {}).get("name"),
-                    "status": (c.get("attributes") or {}).get("status"),
-                    "reward_points": (c.get("attributes") or {}).get("reward_points"),
-                    "start": _chore_when(c.get("attributes") or {}),
-                }
-                for c in chores
-            ],
+            "chores": [_enrich_chore(c, cat_map) for c in chores],
             "by_status": _status_breakdown(chores),
         }
 
@@ -237,7 +312,7 @@ class SkylightMealsTodaySensor(_SkylightBaseSensor):
         out = []
         for m in _meal_entries(self.coordinator.data or {}):
             attrs = m.get("attributes", {}) if isinstance(m, dict) else {}
-            if _meal_when(attrs).startswith(today):
+            if _meal_scheduled_for_today(attrs, today):
                 out.append(m)
         return out
 
@@ -248,23 +323,14 @@ class SkylightMealsTodaySensor(_SkylightBaseSensor):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         meals = self._today_meals()
+        cats, recipes = _meal_included_maps(self.coordinator.data or {})
         by_slot: dict[str, int] = {name: 0 for name in MEAL_CATEGORY_NAMES.values()}
         for m in meals:
             cat_id = _meal_category_id(m)
             slot = MEAL_CATEGORY_NAMES.get(cat_id or "", "Other")
             by_slot[slot] = by_slot.get(slot, 0) + 1
         return {
-            "meals": [
-                {
-                    "id": m.get("id"),
-                    "summary": (m.get("attributes") or {}).get("summary"),
-                    "date": _meal_when(m.get("attributes") or {}),
-                    "category": MEAL_CATEGORY_NAMES.get(
-                        _meal_category_id(m) or "", "Other"
-                    ),
-                }
-                for m in meals
-            ],
+            "meals": [_enrich_meal(m, cats, recipes) for m in meals],
             "by_slot": by_slot,
         }
 
@@ -286,7 +352,7 @@ class SkylightMealSlotSensor(_SkylightBaseSensor):
         out = []
         for m in _meal_entries(self.coordinator.data or {}):
             attrs = m.get("attributes", {}) if isinstance(m, dict) else {}
-            if not _meal_when(attrs).startswith(today):
+            if not _meal_scheduled_for_today(attrs, today):
                 continue
             if _meal_category_id(m) != self._category_id:
                 continue
@@ -298,25 +364,64 @@ class SkylightMealSlotSensor(_SkylightBaseSensor):
         meals = self._slot_meals()
         if not meals:
             return "none"
-        summaries = [
-            (m.get("attributes") or {}).get("summary") or "?"
-            for m in meals
-        ]
+        cats, recipes = _meal_included_maps(self.coordinator.data or {})
+        summaries = []
+        for m in meals:
+            enriched = _enrich_meal(m, cats, recipes)
+            # Prefer recipe title when it's meaningfully different from the summary.
+            title = enriched.get("recipe_title") or enriched.get("summary") or "?"
+            summaries.append(title)
         return ", ".join(summaries)[:255]
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        meals = self._slot_meals()
+        cats, recipes = _meal_included_maps(self.coordinator.data or {})
         return {
-            "count": len(self._slot_meals()),
-            "meals": [
+            "count": len(meals),
+            "meals": [_enrich_meal(m, cats, recipes) for m in meals],
+        }
+
+
+class SkylightTaskBoxSensor(_SkylightBaseSensor):
+    """Reusable chore-template items — the frame's Task Box.
+
+    State is the item count. `extra_state_attributes.items` lists every
+    template with summary, emoji, reward_points, and routine flag — the pool
+    the frame pulls from when adding an ad-hoc chore from its touchscreen.
+    """
+
+    _attr_name = "Task box"
+    _attr_icon = "mdi:clipboard-list-outline"
+
+    def __init__(self, coordinator, frame_id, frame_name):
+        super().__init__(coordinator, frame_id, frame_name)
+        self._attr_unique_id = f"skylight_{frame_id}_task_box"
+
+    def _items(self) -> list[dict]:
+        raw = (self.coordinator.data or {}).get("task_box")
+        if raw is None:
+            return []
+        entries = raw if isinstance(raw, list) else raw.get("data", [])
+        return [e for e in entries if isinstance(e, dict)]
+
+    @property
+    def native_value(self) -> int:
+        return len(self._items())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {
+            "items": [
                 {
-                    "id": m.get("id"),
-                    "summary": (m.get("attributes") or {}).get("summary"),
-                    "description": (m.get("attributes") or {}).get("description"),
-                    "note": (m.get("attributes") or {}).get("note"),
+                    "id": e.get("id"),
+                    "summary": e.get("attributes", {}).get("summary"),
+                    "emoji": e.get("attributes", {}).get("emoji_icon"),
+                    "reward_points": e.get("attributes", {}).get("reward_points"),
+                    "routine": e.get("attributes", {}).get("routine"),
                 }
-                for m in self._slot_meals()
-            ],
+                for e in self._items()
+            ]
         }
 
 
