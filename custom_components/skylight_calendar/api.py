@@ -289,6 +289,19 @@ class SkylightAPI:
     async def get_rewards(self, frame_id: str) -> dict:
         return await self._request("GET", f"/api/frames/{frame_id}/rewards")
 
+    async def get_task_box(self, frame_id: str) -> dict:
+        """Reusable chore-template items (the frame's 'Task Box').
+
+        Returns a flat list of task_box_item records — the pool the frame
+        pulls from when adding an ad-hoc chore from its touchscreen.
+        """
+        return await self._request("GET", f"/api/frames/{frame_id}/task_box/items")
+
+    async def get_recipe(self, frame_id: str, recipe_id: str) -> dict:
+        return await self._request(
+            "GET", f"/api/frames/{frame_id}/meals/recipes/{recipe_id}"
+        )
+
     async def get_messages(self, frame_id: str, page_token: str = "__START__") -> dict:
         """Photo/message feed."""
         return await self._request(
