@@ -1,4 +1,4 @@
-"""The Skylight Calendar integration."""
+"""The Skylight integration."""
 
 from __future__ import annotations
 

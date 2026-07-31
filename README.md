@@ -33,11 +33,11 @@ All entities are grouped under one HA device per frame.
    [![Open your Home Assistant instance and open a repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=devinslick&repository=skylight_hass&category=integration)
 3. Search for **Skylight** and click **Download**. If you want the beta channel, toggle **Show beta versions** and pick the newest `v2.0.0-beta.N` tag.
 4. Restart Home Assistant.
-5. Settings → Devices & Services → **Add Integration** → **Skylight Calendar**.
+5. Settings → Devices & Services → **Add Integration** → **Skylight**.
 
 ### Manual
 
-Copy `custom_components/skylight_calendar/` into `config/custom_components/skylight_calendar/` and restart HA.
+Copy `custom_components/skylight/` into `config/custom_components/skylight/` and restart HA.
 
 ---
 
@@ -209,7 +209,7 @@ action:
 
 ## Multi-frame support
 
-Each frame gets its own HA config entry. To add a second frame, run **Add Integration → Skylight Calendar** again with the same tokens — the picker will show frames not already configured.
+Each frame gets its own HA config entry. To add a second frame, run **Add Integration → Skylight** again with the same tokens — the picker will show frames not already configured.
 
 Multi-frame within a single entry is deferred.
 
@@ -223,7 +223,7 @@ Enable debug logging:
 logger:
   default: info
   logs:
-    custom_components.skylight_calendar: debug
+    custom_components.skylight: debug
 ```
 
 | Symptom | Cause / fix |

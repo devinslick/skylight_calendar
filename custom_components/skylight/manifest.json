@@ -1,6 +1,6 @@
 {
-  "domain": "skylight_calendar",
-  "name": "Skylight Calendar",
+  "domain": "skylight",
+  "name": "Skylight",
   "version": "2.0.0",
   "documentation": "https://github.com/devinslick/skylight_hass",
   "issue_tracker": "https://github.com/devinslick/skylight_hass/issues",

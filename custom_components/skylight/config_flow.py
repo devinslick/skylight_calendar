@@ -1,4 +1,4 @@
-"""Config flow for Skylight Calendar (manual OAuth2 token capture)."""
+"""Config flow for Skylight (manual OAuth2 token capture)."""
 
 from __future__ import annotations
 
