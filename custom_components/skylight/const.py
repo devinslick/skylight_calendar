@@ -1,6 +1,6 @@
 """Constants for the Skylight Calendar integration."""
 
-DOMAIN = "skylight_calendar"
+DOMAIN = "skylight"
 
 # Config entry keys
 CONF_ACCESS_TOKEN = "access_token"

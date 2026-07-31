@@ -1,5 +1,16 @@
 # Skylight for Home Assistant
 
+> ⚠️ **v3.0.0 is a breaking change.** The integration domain was renamed `skylight_calendar` → `skylight`. Every entity ID, service name, and config entry needs to be redone.
+>
+> **Upgrade procedure:**
+> 1. In HA: **Settings → Devices & Services → Skylight → three-dot menu → Delete**
+> 2. HACS: **Skylight → three-dot menu → Redownload → v3.0.0**
+> 3. Restart Home Assistant
+> 4. **Settings → Devices & Services → Add Integration → Skylight** — sign in again
+> 5. Update any automations/dashboards referencing `skylight_calendar.*` entity IDs or the `skylight_calendar.upload_media` service to use `skylight.*` and `skylight.upload_media`
+>
+> The rename brings the domain in line with the display name and repo. It also removes the last "calendar" naming artifact from what is now a full-platform integration (calendar + chores + meals + tasks + rewards + lists + frame device controls + photo upload).
+
 Full [Skylight Calendar Frame](https://www.ourskylight.com/) integration for Home Assistant — calendar events, chores (whole-frame + per-family-member), meals (per-slot + full recipe detail), task box, shopping / to-do lists, reward stars, and frame device controls (brightness, slideshow speed, sleep mode).
 
 > ⚠️ v2.x is a breaking change from any pre-fork release. Auth is now proper OAuth2 (authorization code + PKCE) — you sign in through your browser during the config flow, no more manual token capture. Existing installations must be removed and re-added.
@@ -44,7 +55,7 @@ Full [Skylight Calendar Frame](https://www.ourskylight.com/) integration for Hom
 
 ## Manual installation
 
-Copy `custom_components/skylight_calendar/` into `config/custom_components/skylight_calendar/` and restart HA.
+Copy `custom_components/skylight/` into `config/custom_components/skylight/` and restart HA.
 
 ---
 
@@ -257,14 +268,14 @@ action:
 
 ## Uploading photos & videos
 
-The integration exposes a `skylight_calendar.upload_media` service that pushes an image or short video to your frame — same path the mobile app uses (temp AWS credentials → SigV4-signed PUT to S3 → notification to Skylight).
+The integration exposes a `skylight.upload_media` service that pushes an image or short video to your frame — same path the mobile app uses (temp AWS credentials → SigV4-signed PUT to S3 → notification to Skylight).
 
 **Supported formats:** jpg, jpeg, png, gif, heic, heif, webp, mp4, mov, m4v.
 
 **Path requirements:** The file must be readable by Home Assistant. Anything under `/config` works, or add the parent directory to `homeassistant.allowlist_external_dirs` in `configuration.yaml`.
 
 ```yaml
-service: skylight_calendar.upload_media
+service: skylight.upload_media
 data:
   file_path: /config/www/family_photo.jpg
   caption: "Sunday brunch"      # optional
@@ -285,7 +296,7 @@ action:
       entity_id: camera.front_door
     data:
       filename: "/config/www/skylight_doorbell.jpg"
-  - service: skylight_calendar.upload_media
+  - service: skylight.upload_media
     data:
       file_path: "/config/www/skylight_doorbell.jpg"
       caption: "Someone at the door!"
@@ -315,7 +326,7 @@ Enable debug logging:
 logger:
   default: info
   logs:
-    custom_components.skylight_calendar: debug
+    custom_components.skylight: debug
 ```
 
 | Symptom | Cause / fix |
