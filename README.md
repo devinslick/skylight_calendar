@@ -255,6 +255,48 @@ action:
 
 ---
 
+## Uploading photos & videos
+
+The integration exposes a `skylight_calendar.upload_media` service that pushes an image or short video to your frame — same path the mobile app uses (temp AWS credentials → SigV4-signed PUT to S3 → notification to Skylight).
+
+**Supported formats:** jpg, jpeg, png, gif, heic, heif, webp, mp4, mov, m4v.
+
+**Path requirements:** The file must be readable by Home Assistant. Anything under `/config` works, or add the parent directory to `homeassistant.allowlist_external_dirs` in `configuration.yaml`.
+
+```yaml
+service: skylight_calendar.upload_media
+data:
+  file_path: /config/www/family_photo.jpg
+  caption: "Sunday brunch"      # optional
+  frame_id: "5377413"           # optional, only needed with multiple frames
+```
+
+**Automation example — send a snapshot from a doorbell trigger:**
+
+```yaml
+alias: Doorbell → Skylight
+trigger:
+  - platform: state
+    entity_id: binary_sensor.front_door
+    to: "on"
+action:
+  - service: camera.snapshot
+    target:
+      entity_id: camera.front_door
+    data:
+      filename: "/config/www/skylight_doorbell.jpg"
+  - service: skylight_calendar.upload_media
+    data:
+      file_path: "/config/www/skylight_doorbell.jpg"
+      caption: "Someone at the door!"
+```
+
+**Caveat on captions:** Free Skylight accounts have captions server-side-disabled (`plus_gated_content.captions = false`). The caption field is still sent, but the frame ignores it. Skylight Plus subscribers get real caption display.
+
+After a successful upload the `image.<frame>_latest_photo` entity refreshes within a few seconds (the service kicks the photos coordinator immediately instead of waiting for the next 30s poll).
+
+---
+
 ## Authentication
 
 The config flow runs a normal OAuth2 authorization-code + PKCE grant. You'll be redirected to Skylight's sign-in page, log in with your Skylight credentials, and consent — HA takes it from there and stores the refresh token. On 401s it rotates automatically and persists the new pair back to the config entry. You should never need to redo this unless you revoke the grant server-side.
