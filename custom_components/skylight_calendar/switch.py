@@ -60,13 +60,27 @@ class SkylightSleepModeSwitch(
         )
 
     @property
+    def _current_device_id(self) -> str | None:
+        data = self.coordinator.data or {}
+        return data.get("device_id") or self.coordinator.device_id
+
+    @property
     def is_on(self) -> bool | None:
-        return bool((self.coordinator.data or {}).get("sleep_mode_on"))
+        attributes = (self.coordinator.data or {}).get("attributes") or {}
+        return bool(attributes.get("sleep_mode_on"))
+
+    async def _async_patch(self, attributes: dict) -> None:
+        device_id = self._current_device_id
+        if not device_id:
+            raise RuntimeError(
+                "Skylight device_id not yet available — first coordinator refresh "
+                "hasn't completed"
+            )
+        await self._api.patch_device(self._frame_id, device_id, attributes)
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._api.patch_frame(self._frame_id, {"sleep_mode_on": True})
-        await self.coordinator.async_request_refresh()
+        await self._async_patch({"sleep_mode_on": True})
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._api.patch_frame(self._frame_id, {"sleep_mode_on": False})
-        await self.coordinator.async_request_refresh()
+        await self._async_patch({"sleep_mode_on": False})

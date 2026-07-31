@@ -61,14 +61,31 @@ class _SkylightFrameNumber(
         )
 
     @property
+    def _current_device_id(self) -> str | None:
+        """Prefer coordinator.data (freshest); fall back to the cached attr."""
+        data = self.coordinator.data or {}
+        return data.get("device_id") or self.coordinator.device_id
+
+    @property
     def native_value(self) -> float | None:
-        raw = (self.coordinator.data or {}).get(self._attr_field)
+        attributes = (self.coordinator.data or {}).get("attributes") or {}
+        raw = attributes.get(self._attr_field)
         if raw is None:
             return None
         try:
             return float(raw)
         except (TypeError, ValueError):
             return None
+
+    async def _async_patch(self, attributes: dict) -> None:
+        device_id = self._current_device_id
+        if not device_id:
+            raise RuntimeError(
+                "Skylight device_id not yet available — first coordinator refresh "
+                "hasn't completed"
+            )
+        await self._api.patch_device(self._frame_id, device_id, attributes)
+        await self.coordinator.async_request_refresh()
 
 
 class SkylightBrightness(_SkylightFrameNumber):
@@ -84,8 +101,7 @@ class SkylightBrightness(_SkylightFrameNumber):
         self._attr_unique_id = f"skylight_{frame_id}_brightness"
 
     async def async_set_native_value(self, value: float) -> None:
-        await self._api.patch_frame(self._frame_id, {"brightness": int(value)})
-        await self.coordinator.async_request_refresh()
+        await self._async_patch({"brightness": int(value)})
 
 
 class SkylightSlideshowSpeed(_SkylightFrameNumber):
@@ -102,5 +118,4 @@ class SkylightSlideshowSpeed(_SkylightFrameNumber):
         self._attr_unique_id = f"skylight_{frame_id}_slideshow_speed"
 
     async def async_set_native_value(self, value: float) -> None:
-        await self._api.patch_frame(self._frame_id, {"slideshow_speed": int(value)})
-        await self.coordinator.async_request_refresh()
+        await self._async_patch({"slideshow_speed": int(value)})

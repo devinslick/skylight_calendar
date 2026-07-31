@@ -171,7 +171,16 @@ class SkylightSensorCoordinator(DataUpdateCoordinator):
 
 
 class SkylightFrameCoordinator(DataUpdateCoordinator):
-    """Fetch frame settings (brightness, sleep_mode_on, slideshow_speed, name...)."""
+    """Fetch device settings (brightness, sleep_mode_on, slideshow_speed, name...).
+
+    Despite the name, this coordinator reads and writes the *device* resource
+    (``/api/frames/{fid}/devices/{did}``), which is where brightness /
+    slideshow_speed / sleep_mode_on actually live. The `/api/frames/{fid}`
+    endpoint embeds these attributes on the frame for convenience but treats
+    them as read-only — writes there return 404 "Record not found".
+
+    Data shape: ``{"device_id": "5669988", "attributes": {...}}``
+    """
 
     def __init__(self, hass: HomeAssistant, api: SkylightAPI, frame_id: str) -> None:
         super().__init__(
@@ -182,15 +191,32 @@ class SkylightFrameCoordinator(DataUpdateCoordinator):
         )
         self.api = api
         self.frame_id = frame_id
+        self._device_id: str | None = None
+
+    @property
+    def device_id(self) -> str | None:
+        """Cached device_id — becomes available after the first successful refresh."""
+        return self._device_id
 
     async def _async_update_data(self) -> dict:
         try:
-            resp = await self.api.get_frame(self.frame_id)
+            devices = await self.api.get_devices(self.frame_id)
         except SkylightAuthError as err:
             raise UpdateFailed(f"Auth failed: {err}") from err
         except SkylightAPIError as err:
             raise UpdateFailed(str(err)) from err
-        return resp.get("data", {}).get("attributes", {}) or {}
+
+        if not devices:
+            raise UpdateFailed(
+                f"Skylight frame {self.frame_id} has no device attached — "
+                "cannot control settings"
+            )
+
+        # A frame is a 1:1 device pairing in production; if that ever changes we
+        # take the first (primary) device deterministically.
+        primary = devices[0]
+        self._device_id = primary["id"]
+        return {"device_id": primary["id"], "attributes": primary["attributes"]}
 
 
 class SkylightPhotosCoordinator(DataUpdateCoordinator):
