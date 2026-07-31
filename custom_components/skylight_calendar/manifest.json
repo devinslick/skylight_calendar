@@ -1,7 +1,7 @@
 {
   "domain": "skylight_calendar",
   "name": "Skylight",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "documentation": "https://github.com/devinslick/skylight_hass",
   "issue_tracker": "https://github.com/devinslick/skylight_hass/issues",
   "requirements": ["python-dateutil>=2.8"],
