@@ -28,7 +28,9 @@ All entities are grouped under one HA device per frame.
 ### HACS (recommended)
 
 1. HACS → Integrations → three-dot menu → **Custom repositories**.
-2. Repository: `https://github.com/devinslick/skylight-hass` — Category: **Integration**.
+2. Repository: `https://github.com/devinslick/skylight_hass` — Category: **Integration**.
+
+   [![Open your Home Assistant instance and open a repository inside HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=devinslick&repository=skylight_hass&category=integration)
 3. Search for **Skylight** and click **Download**. If you want the beta channel, toggle **Show beta versions** and pick the newest `v2.0.0-beta.N` tag.
 4. Restart Home Assistant.
 5. Settings → Devices & Services → **Add Integration** → **Skylight Calendar**.
