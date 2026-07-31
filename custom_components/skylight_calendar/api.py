@@ -161,10 +161,36 @@ class SkylightAPI:
     async def get_frame(self, frame_id: str) -> dict:
         return await self._request("GET", f"/api/frames/{frame_id}")
 
-    async def patch_frame(self, frame_id: str, attributes: dict) -> dict:
-        """PATCH frame attributes (brightness, sleep_mode_on, slideshow_speed, etc.)."""
-        body = {"data": {"type": "frame", "id": frame_id, "attributes": attributes}}
-        return await self._request("PATCH", f"/api/frames/{frame_id}", json_body=body)
+    async def get_devices(self, frame_id: str) -> list[dict]:
+        """List devices attached to a frame.
+
+        Frame-level settings (brightness, slideshow_speed, sleep_mode_on, etc.)
+        actually live on the device, not the frame — `/api/frames/{fid}` embeds
+        the device attributes for convenience, but the writable resource is
+        `/api/frames/{fid}/devices/{did}`. Returns each device as a dict with
+        {id, attributes}.
+        """
+        resp = await self._request("GET", f"/api/frames/{frame_id}/devices")
+        return [
+            {"id": str(d.get("id")), "attributes": d.get("attributes", {}) or {}}
+            for d in resp.get("data", [])
+            if d.get("id") is not None
+        ]
+
+    async def patch_device(
+        self, frame_id: str, device_id: str, attributes: dict
+    ) -> dict:
+        """PATCH device settings (brightness 0-255, slideshow_speed, sleep_mode_on, …).
+
+        Verified request shape: plain-JSON body, keys sent flat (no JSON:API
+        envelope, no ``device`` wrapper). Returns the fresh device resource so
+        callers can update local state without a re-fetch.
+        """
+        return await self._request(
+            "PATCH",
+            f"/api/frames/{frame_id}/devices/{device_id}",
+            json_body=attributes,
+        )
 
     async def get_calendar_events(
         self, frame_id: str, date_min: str, date_max: str, timezone: str = "UTC"
